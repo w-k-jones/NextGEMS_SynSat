@@ -1,5 +1,5 @@
 #!/home/b/b382728/miniconda3/envs/tobac_flow/bin/python
-#SBATCH --job-name=synsat_tracking_2033
+#SBATCH --job-name=seviri_tracking
 #SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -63,67 +63,18 @@ from tobac_flow.detection import (
     detect_anvils,
     relabel_anvils,
 )
-synsat_path = pathlib.Path("/work/bb1376/user/fabian/data/synsat/ngc4008a-zoom9/maxzen")
 
-synsat_files = sorted(list(synsat_path.glob("synsat_ngc4008a-zoom9_maxzen_2033*.nc")))
+data_path = pathlib.Path("/scratch/b/b382728/seviri_regrid_binned/")
 
-mask = xr.open_dataset("/work/bb1376/user/fabian/data/synsat/ngc4008a-zoom9/aux/ngc4008a-zoom9_maxzen80_mask_for_embedding.nc")
+seviri_files = sorted(list(data_path.glob("*.nc")))
 
-def regrid_synsat(input_filename, grid_spacing=0.1, limits=[-45,45,-30,30]):
-    lon = xr.DataArray(
-        np.arange(limits[0]+grid_spacing/2, limits[1], grid_spacing)%360, 
-        dims=("lon",), name="lon", attrs=dict(units="degrees", standard_name="longitude")
-    )
-    lat = xr.DataArray(
-        np.arange(limits[2]+grid_spacing/2, limits[3], grid_spacing), 
-        dims=("lat",), name="lat", attrs=dict(units="degrees", standard_name="latitude")
-    )
-    pix = xr.DataArray(
-        healpy.ang2pix(mask.crs.healpix_nside, *np.meshgrid(lon, lat), nest=True, lonlat=True),
-        coords=(lat, lon),
-    )
+regrid_ds = xr.open_mfdataset(seviri_files, combine="nested", concat_dim="t")
+regrid_ds = regrid_ds.assign_coords(t=list(map(lambda f: datetime.strptime(f.name[24:38], "%Y%m%d%H%M%S"), seviri_files)))
 
-    with xr.open_dataset(input_filename) as dataset:
-        bt = xr.DataArray(
-            np.full((1,)+mask.zen_mask.shape, np.nan, dtype=dataset.bt108.data.dtype), 
-            coords = dict(crs=mask.crs, time=dataset.time, cell=mask.cell), 
-            dims = ("time", "cell"), 
-            attrs = dataset.bt108.attrs
-        )
-        bt[0][mask.zen_mask.data==1] = dataset.bt108.data[0]
-        bt = bt.isel(cell=pix)
+bt = regrid_ds.bt.compute()
+wvd = regrid_ds.wvd.compute()
+swd = regrid_ds.swd.compute()
 
-        wvd = xr.DataArray(
-            np.full((1,)+mask.zen_mask.shape, np.nan, dtype=dataset.bt062.data.dtype), 
-            coords = dict(crs=mask.crs, time=dataset.time, cell=mask.cell), 
-            dims = ("time", "cell"), 
-            attrs = dataset.bt062.attrs
-        )
-        wvd[0][mask.zen_mask.data==1] = dataset.bt062.data[0] - dataset.bt073.data[0]
-        wvd = wvd.isel(cell=pix)
-
-        swd = xr.DataArray(
-            np.full((1,)+mask.zen_mask.shape, np.nan, dtype=dataset.bt087.data.dtype), 
-            coords = dict(crs=mask.crs, time=dataset.time, cell=mask.cell), 
-            dims = ("time", "cell"), 
-            attrs = dataset.bt087.attrs
-        )
-        swd[0][mask.zen_mask.data==1] = dataset.bt087.data[0] - dataset.bt120.data[0]
-        swd = swd.isel(cell=pix)
-
-    return bt, wvd, swd
-
-regrid_stack = [regrid_synsat(f, grid_spacing=0.1, limits=[-75,75,-75,75]) for f in synsat_files]
-
-bt, wvd, swd = [xr.concat(z, "time").rename(time="t") for z in zip(*regrid_stack)]
-
-t_inds = np.unique(bt.t, return_index=True)[1]
-
-bt = bt.isel(t=t_inds)
-wvd = wvd.isel(t=t_inds)
-swd = swd.isel(t=t_inds)
-
-from tobac_flow.flow import create_flow
 flow = create_flow(
     bt, model="Farneback", vr_steps=1, smoothing_passes=1, interp_method="linear"
 )
@@ -133,12 +84,7 @@ overlap = 0.5
 absolute_overlap = 1
 subsegment_shrink = 0.0
 min_length = 2
-from tobac_flow.detection import (
-    detect_cores,
-    get_anvil_markers,
-    detect_anvils,
-    relabel_anvils,
-)
+
 core_labels = detect_cores(
     flow,
     bt,
@@ -277,10 +223,10 @@ print(f"Final anvil count: {dataset.anvil.size}")
 print(f"Final valid thick anvil count: {dataset.thick_anvil_is_valid.data.sum()}")
 print(f"Final valid thin anvil count: {dataset.thin_anvil_is_valid.data.sum()}")
 
-dataset.drop_vars(["bt"])
-
 comp = dict(zlib=True, complevel=5, shuffle=True)
 for var in dataset.data_vars:
     dataset[var].encoding.update(comp)
 
-dataset.to_netcdf("./synsat_tracking_zoom9_2033.nc")
+dataset.drop_vars(["bt"])
+
+dataset.to_netcdf("./seviri_tracking_binned_2021.nc")
